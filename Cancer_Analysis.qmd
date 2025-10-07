@@ -1,0 +1,370 @@
+---
+title: "Cancer_Report"
+format: html
+editor: visual
+---
+
+```{r}
+# Import the libraries
+library(tidyverse)
+library(tidymodels)
+library(GGally)
+library(vip)
+library(cowplot)
+```
+
+```{r}
+# Load the dataset
+cancer_data <- read_tsv("~/cancer_staging_data.tsv")
+```
+
+According to the data set there is a single outcome that is categorical and multiple predictors, which are either categorical or numerical. Thus, the category of machine learning models that should be used for this analysis is classification. For this analysis, I plan to use logistic regression and random forest models. Logistic regression is suitable because it predicts the probability of the binary outcome based on multiple predictors, while random forest...\
+To obtain an initial overview of the data set, I first generated a scatter plot matrix including all variables. This allowed me to explore general relationships between variables and potential correlations.
+
+```{r, message=FALSE}
+# Visualise the relationships between the variables 
+scatterplot_matrix <- ggpairs(cancer_data)
+print(scatterplot_matrix)
+```
+
+Then, I generated a scatter plot excluding the outcome variable from the axes and mapping it to color, to check whether the predictors are distributed differently depending on the outcome class.
+
+```{r, message=FALSE}
+names(cancer_data)
+ggpairs(cancer_data, columns = c(1:9), aes(colour = presence_metastasis))
+```
+
+Overall, the predictors appear largely uncorrelated with each other, as most scatter plots show no clear patterns or trends. The outcome variable is fairly evenly distributed across the range of each predictor and there is no clear indication that a single predictor differentiate the binary outcome.
+
+```{r}
+# Split the data into training and testing
+set.seed(123)
+cancer_data_split = initial_split(cancer_data %>% 
+mutate
+(presence_metastasis = factor(presence_metastasis, levels = c("yes", "no"))),prop = 0.75,strata = presence_metastasis)
+cancer_data_training <- training(cancer_data_split)
+cancer_data_testing <- testing(cancer_data_split)
+```
+
+## Logistic Regression
+
+```{r}
+# Define the model
+logreg_model <- logistic_reg() %>% 
+  set_engine("glm") %>% 
+  set_mode("classification")
+
+# Create the recipe
+logreg_recipe <- 
+  recipe(presence_metastasis ~ .,
+         data = cancer_data_training) %>% 
+  step_dummy(all_nominal_predictors()) %>%
+  step_normalize()
+
+# Create the workflow
+logreg_wf <- workflow() %>% 
+  add_model(logreg_model) %>% 
+  add_recipe(logreg_recipe)
+# Fit the workflow 
+logreg_wf_fit <- fit(
+  logreg_wf,
+  cancer_data_training
+)
+```
+
+To evaluate the individual contribution of each predictor to the outcome and statistical significance of each predictor variable in the logistic regression model, I used tidy() function.\
+The tidy() function summarizes the key model parameters in a data frame.\
+The key metrics for inference obtained are:\
+-**point estimate:** which is a number that represents the population parameter, that in this analysis is the beta coefficient (β). This value quantifies the direction and magnitude of the relationship between the predictor and the log-odds of the outcome. A positive estimate indicates an increase in the likelihood of the positive outcome\
+-**standard error:** margin of error of the estimate which measures the uncertainty of the estimate value smaller standard error implies a more\
+reliable\
+**-statistic:** is the z-score.\
+**-P value:** shows the statistical significance of the variable\
+Then, i exponentiate the estimate to obtain the odds ratio and also filter the variables that have p-value \< 0.05 to identify predictors that have a statistically significant relationship with the outcome so those predictors have real effect on the outcome.
+
+```{r}
+# Extract model coefficients and their statistics from the logistic regression workflow fit
+tidy(logreg_wf_fit)
+
+# convert the estimates to an odds-ratio and filter for statistically significant predictors (p-value < 0.05)
+tidy(logreg_wf_fit, exponentiate = TRUE) %>% 
+  filter(p.value < 0.05)
+
+# Perform the prediction
+logreg_wf_prediction <- bind_cols(
+  cancer_data_testing %>% select(presence_metastasis),
+  logreg_wf_fit %>% 
+    predict(cancer_data_testing, type = "class"),
+  logreg_wf_fit %>% 
+    predict(cancer_data_testing, type = "prob")
+)
+
+```
+
+The predictors staining_04 and staining_02 have a p-value \< 0.05, which provides evidence of a statistically significant relationship with the outcome.
+
+```{r}
+# Create a variable importance plot for the logistic regression model, displaying the top 10 most important features
+logreg_wf_fit %>% 
+  extract_fit_parsnip() %>% 
+  vip(num_features = 10, geom = "point")
+```
+
+The variable importance plot identified staining_04 and staining_02 as the two most influential predictors in the logistic regression model. This finding is supported by their high coefficient estimates(beta coefficient) and statistically significant p-values (p \< 0.05), confirming a strong and reliable association with the outcome variable. Therefore, higher levels of the bio markers represented by staining_04 and staining_02 are strongly associated with an increased likelihood of metastasis in this model.
+
+```{r}
+#Calculate the accuracy and kappa coefficient
+logreg_wf_prediction %>% metrics(truth = presence_metastasis, estimate = .pred_class)
+```
+
+The logistic regression model achieved an accuracy of 84.1%, indicating it correctly predicts metastasis status for the majority of cases. The Cohen's kappa value of 0.68 demonstrates substantial agreement between the predicted and observed metastasis outcomes, accounting for chance. These results suggest that the selected predictors have a meaningful influence on metastasis and that the model provides reliable predictions beyond random chance.
+
+```{r}
+# Precision (proportion of truth among results) and recall (how much the model captures reality)
+precision(logreg_wf_prediction, truth = presence_metastasis, estimate = .pred_class)
+recall(logreg_wf_prediction, truth = presence_metastasis, estimate = .pred_class)
+spec(logreg_wf_prediction, truth = presence_metastasis, estimate = .pred_class)
+```
+
+```{r}
+# F1 score gives a better measure of the incorrectly classified cases than the accuracy metrics
+# It's another way to measure accuracy, to be preferred in case false negatives and false positives are crucial
+f_meas(logreg_wf_prediction, truth = presence_metastasis, estimate = .pred_class)
+```
+
+The **F1 score of 0.83** reflects a strong balance between precision and recall, showing that the model reliably identifies metastatic cases while minimizing false positives.\
+The confusion matrix was generated to evaluate the model's classification performance in detail, showing how many cases were correctly or incorrectly predicted
+
+```{r}
+# Confusion matrix
+logreg_conf_mat <- logreg_wf_prediction %>% 
+  conf_mat(truth = presence_metastasis, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+print(logreg_conf_mat)
+```
+
+```{r}
+# ROC Curve
+logreg_roc <- logreg_wf_prediction %>%
+  roc_curve(presence_metastasis, .pred_yes) %>% 
+  autoplot()
+print(logreg_roc)
+# AUC
+logreg_auc <- logreg_wf_prediction %>%
+  roc_auc(presence_metastasis, .pred_yes)
+
+print(logreg_auc)
+
+# If you only want the numeric value
+logreg_auc_value <- logreg_auc$.estimate
+print(logreg_auc_value)
+```
+
+The logistic regression model performs very well, with an AUC of about 0.9, indicating excellent discriminative ability between cases with and without metastasis.
+
+## Random Forest For Classification
+
+"The Random Forest algorithm was selected to complement the logistic regression baseline and to address the complex, non-linear nature of predicting metastasis presence/absence from mixed data types. While logistic regression provided a strong benchmark (Accuracy: \~83-84%, Kappa: 0.68), its inherent linearity limits its ability to capture intricate interactions between the clinical predictors. Random Forest, as an ensemble method, excels at modeling these complex relationships by aggregating predictions from hundreds of decorrelated decision trees, thereby reducing variance and mitigating overfitting to enhance generalizability. Furthermore, its superior capability to rank feature importance directly addresses the secondary goal of identifying the predictors with the most influence on metastatic outcome, providing actionable clinical insights beyond pure predictive performance
+
+```{r}
+# Define the model
+rf_class_model <- rand_forest(
+  trees = tune(),
+  mtry = tune(),
+  min_n = tune()
+) %>% 
+  set_mode("classification") %>% 
+  set_engine("ranger")
+```
+
+```{r}
+# Set up the tuning grid
+rf_class_tuning_grid <- grid_regular(
+  trees(),
+  mtry(range = c(5L,8L)),
+  min_n(),
+  levels = 3)
+```
+
+Setting up cross-validation folds (vfold_cv) is a fundamental step to ensure a rigorous and unbiased evaluation of our models. By splitting the training data into multiple, rotating subsets (folds), the model is iteratively trained on a complementary subset of the data and validated on the excluded fold. This process is repeated until each fold has served as the validation set once.
+
+```{r}
+# Generate data folds
+set.seed(123)
+cancer_data_folds <- vfold_cv(cancer_data_training)
+```
+
+```{r}
+# Extract the predictors for building a formula
+predictors <- names(cancer_data)[!(names(cancer_data) %in% c("presence_metastasis"))]
+```
+
+This specific recipe ensures categorical predictors are converted to dummy variables and all predictors are normalized, which is essential for many algorithms to function correctly and prevents features on larger scales from unduly influencing the model.
+
+```{r}
+# Define the recipe
+rf_class_recipe <- recipe(
+  as.formula(
+    paste0("presence_metastasis ~ ", paste0(predictors, collapse = " + "))
+  ),
+  data = cancer_data_training
+) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_normalize(all_predictors())
+
+```
+
+```{r}
+# Create the workflow
+rf_class_wf <- workflow() %>% 
+  add_model(rf_class_model) %>% 
+  add_recipe(rf_class_recipe)
+```
+
+```{r}
+# Tune
+rf_tuning_results <- rf_class_wf %>% 
+  tune_grid(
+    resamples = cancer_data_folds,
+    grid = rf_class_tuning_grid
+  )
+```
+
+Following the tuning process, the optimal hyperparameter combination was extracted by selecting the values that yielded the highest average performance, across all cross-validation folds. his best parameter set was then used to finalize the workflow, ensuring that the subsequent model training on the entire dataset would utilize the configuration most proven to enhance predictive accuracy and generalization.
+
+```{r}
+# Extract best hyperparams based on the accuracy
+rf_tuning_best_params <- rf_tuning_results %>%
+  select_best("accuracy")
+print(rf_tuning_best_params)
+```
+
+```{r}
+# Finalise the workflow 
+final_rf_class_wf <- rf_class_wf %>% 
+  finalize_workflow(rf_tuning_best_params)
+```
+
+```{r}
+# Fit the workflow with the best hyperparameters
+final_rf_class_fit <- final_rf_class_wf %>% 
+  last_fit(cancer_data_split)
+
+```
+
+```{r}
+# Accuracy and roc_auc
+final_rf_class_fit %>% 
+  collect_metrics()
+```
+
+The tuned Random Forest model demonstrated strong predictive performance, achieving a cross-validation accuracy of 84.1% and a notably high ROC AUC score of 0.946. The high accuracy indicates the model correctly classified the presence or absence of metastasis in a significant majority of cases.
+
+```{r}
+# Collect predictions for each train/test split of data
+final_rf_class_fit %>% 
+  collect_predictions()
+```
+
+```{r}
+# Finalise the best model
+rf_tuning_best_model <- finalize_model(
+  rf_class_model, ## this is the model we initially created with tune placeholders
+  rf_tuning_best_params ## these are the best parameters identified in tuning
+)
+```
+
+```{r}
+# Create a variable importance plot for the random forest (classification), displaying the top 10 most important features
+rf_tuning_best_model %>%
+  set_engine("ranger", importance = "permutation") %>%
+  fit(
+    as.formula(
+      paste0("presence_metastasis ~ ", paste0(predictors, collapse = " + "))
+    ),
+    data = cancer_data_testing
+  ) %>%
+  vip(geom = "point")
+```
+
+tumor_Stage and staining_02 are the two most important predictors that contribute the most to the presence of metastasis.
+
+```{r}
+# Inference on the "most important" variable for the model prediction according to the vip plot
+chisq_test(cancer_data, presence_metastasis ~ tumour_stage)
+
+```
+
+```{r}
+# Confusion matrix
+rf_conf_mat <- final_rf_class_fit %>% 
+  collect_predictions() %>% 
+  conf_mat(truth = presence_metastasis, estimate = .pred_class) %>% 
+  autoplot(type = "heatmap")
+print(rf_conf_mat)
+```
+
+The confusion matrix reveals that the Random Forest model demonstrates strong and well-balanced predictive performance.
+
+```{r}
+# ROC Curve
+rf_roc <- final_rf_class_fit %>% 
+  collect_predictions() %>% 
+  roc_curve(presence_metastasis, .pred_yes) %>% 
+  autoplot()
+print(rf_roc)
+# Calculate AUC
+rf_auc <- final_rf_class_fit %>% 
+  collect_predictions() %>% 
+  roc_auc(presence_metastasis, .pred_yes)
+
+print(rf_auc)
+```
+
+The random forest model performs very well, with an AUC of about 0.9, indicating excellent discriminative ability between cases with and without metastasis.
+
+## Models Comparison
+
+```{r}
+
+# Build comparison table
+compare_metrics <- bind_rows(
+  bind_cols(
+    logreg_wf_prediction %>%
+      metrics(truth = presence_metastasis, estimate = .pred_class) %>%
+      select(.metric, .estimate),
+    model = "logreg"
+  ),
+  bind_cols(
+    logreg_auc,
+    model = "logreg"
+  ),
+  bind_cols(
+    final_rf_class_fit %>%
+      collect_metrics() %>%
+      select(.metric, .estimate),
+    model = "rf_class"
+  )
+) %>%
+  pivot_wider(
+    names_from = .metric,
+    values_from = .estimate
+  )
+
+print(compare_metrics)
+
+```
+
+Both logistic regression and random forest achieved the same accuracy of 0.84, but their performance differs slightly in other metrics.
+
+```{r}
+# Compare confusion matrices
+plot_grid(logreg_conf_mat, rf_conf_mat, labels = c('Logistic Regression', 'Random Forest'), label_size = 16, ncol = 2, align = 'v')
+```
+
+```{r}
+# Compare ROC curves
+plot_grid(logreg_roc, rf_roc, labels = c('Logistic Regression', 'Random Forest'), label_size = 16, ncol = 2, align = 'v')
+```
+
+Overall, the performance of the two models is approximately.
